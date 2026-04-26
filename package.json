@@ -1,22 +1,20 @@
 {
   "name": "rdx-whatsapp-bot",
   "version": "3.0.0",
-  "description": "RDX Premium WhatsApp Bot with Admin Dashboard",
+  "description": "RDX Premium WhatsApp Bot",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "build": "npm install --legacy-peer-deps"
+    "postinstall": "echo 'Installed!'"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
-    "axios": "^1.6.0",
-    "express": "^4.18.2",
-    "fs-extra": "^11.2.0",
-    "moment-timezone": "^0.5.44",
-    "qrcode-terminal": "^0.12.0"
+    "@whiskeysockets/baileys": "*",
+    "express": "*",
+    "fs-extra": "*",
+    "moment-timezone": "*",
+    "qrcode-terminal": "*"
   },
   "engines": {
     "node": ">=18.0.0"
-  },
-  "author": "Ahmad RDX"
+  }
 }
