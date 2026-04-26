@@ -3,240 +3,303 @@ const {
     useMultiFileAuthState,
     DisconnectReason,
     fetchLatestBaileysVersion,
-    makeInMemoryStore,
-    Browsers
+    Browsers,
+    downloadContentFromMessage
 } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs-extra');
 const path = require('path');
 const moment = require('moment-timezone');
+const express = require('express');
 const readline = require('readline');
-const pino = require('pino');
 
-// =========== CONFIGURATION ===========
+// =========== CONFIGURATION (SAB KUCH CODE MEIN) ===========
 const CONFIG = {
-    PREFIX: '.',
+    // Bot Settings
     BOT_NAME: 'RDX Bot',
+    PREFIX: '.',
     OWNER_NAME: 'Ahmad RDX',
-    OWNER_NUMBER: '', // Apna WhatsApp number (without +, with country code)
-    SESSION_DIR: './session',
+    OWNER_NUMBER: '923000000000', // Apna WhatsApp number
+    
+    // Login Settings
     LOGIN_METHOD: 'pairing', // 'pairing' ya 'qr'
+    
+    // Dashboard Settings
+    DASHBOARD_PORT: 3000,
+    DASHBOARD_USERNAME: 'admin',
+    DASHBOARD_PASSWORD: 'ahmadrdx123',
+    
+    // Allowed Users (Bot jin numbers par lagega)
+    ALLOWED_USERS: [
+        '923000000000@s.whatsapp.net', // Number 1
+        '923000000001@s.whatsapp.net', // Number 2
+        // Aur numbers add karo
+    ],
+    
+    // Admin Numbers (Dashboard access + Bot control)
+    ADMIN_NUMBERS: [
+        '923000000000', // Admin 1
+    ],
+    
+    SESSION_DIR: './session',
+    DATA_DIR: './data',
+    CACHE_DIR: './cache'
 };
+
+// Bot settings (runtime changeable)
+let botSettings = {
+    prefix: CONFIG.PREFIX,
+    allowedUsers: [...CONFIG.ALLOWED_USERS],
+    adminNumbers: [...CONFIG.ADMIN_NUMBERS],
+    autoReply: true,
+    welcomeNewUsers: true
+};
+
+// =========== DATA STORAGE ===========
+let botData = {
+    users: {},         // User info store
+    messages: [],      // Message logs
+    commandsUsed: {},  // Command statistics
+    bannedUsers: [],   // Banned users
+    pairs: {}          // User pairs
+};
+
+// Load existing data
+try {
+    const dataPath = path.join(CONFIG.DATA_DIR, 'botData.json');
+    if (fs.existsSync(dataPath)) {
+        botData = JSON.parse(fs.readFileSync(dataPath));
+    }
+} catch (e) {}
+
+// Save data function
+function saveData() {
+    fs.ensureDirSync(CONFIG.DATA_DIR);
+    fs.writeFileSync(
+        path.join(CONFIG.DATA_DIR, 'botData.json'),
+        JSON.stringify(botData, null, 2)
+    );
+}
+
+// =========== EXPRESS DASHBOARD ===========
+const app = express();
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Auth middleware
+function authMiddleware(req, res, next) {
+    const auth = req.headers.authorization;
+    if (!auth || auth !== `Basic ${Buffer.from(`${CONFIG.DASHBOARD_USERNAME}:${CONFIG.DASHBOARD_PASSWORD}`).toString('base64')}`) {
+        res.set('WWW-Authenticate', 'Basic realm="RDX Bot Dashboard"');
+        return res.status(401).json({ error: 'Authentication required' });
+    }
+    next();
+}
+
+// =========== DASHBOARD ROUTES ===========
+
+// Dashboard Login Page
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'dashboard.html'));
+});
+
+// API: Bot Status
+app.get('/api/status', (req, res) => {
+    const uptime = process.uptime();
+    const d = Math.floor(uptime / 86400);
+    const h = Math.floor((uptime % 86400) / 3600);
+    const m = Math.floor((uptime % 3600) / 60);
+    
+    const memUsage = process.memoryUsage();
+    
+    res.json({
+        bot: {
+            name: CONFIG.BOT_NAME,
+            status: global.botConnection || 'disconnected',
+            prefix: botSettings.prefix,
+            uptime: `${d}d ${h}h ${m}m`,
+            owner: CONFIG.OWNER_NAME
+        },
+        stats: {
+            totalUsers: Object.keys(botData.users).length,
+            totalMessages: botData.messages.length,
+            commandsUsed: botData.commandsUsed,
+            allowedUsers: botSettings.allowedUsers.length,
+            bannedUsers: botData.bannedUsers.length,
+            totalPairs: Object.keys(botData.pairs).length
+        },
+        system: {
+            memory: `${(memUsage.heapUsed / 1024 / 1024).toFixed(2)}MB / ${(memUsage.heapTotal / 1024 / 1024).toFixed(2)}MB`,
+            platform: process.platform,
+            nodeVersion: process.version
+        },
+        timestamp: moment().tz('Asia/Karachi').format('hh:mm:ss A | DD/MM/YYYY')
+    });
+});
+
+// API: All Users List
+app.get('/api/users', authMiddleware, (req, res) => {
+    const usersList = Object.entries(botData.users).map(([jid, user]) => ({
+        jid: jid,
+        number: jid.split('@')[0],
+        name: user.name || 'Unknown',
+        role: botSettings.adminNumbers.includes(jid.split('@')[0]) ? 'admin' : 'user',
+        allowed: botSettings.allowedUsers.includes(jid),
+        banned: botData.bannedUsers.includes(jid),
+        messageCount: user.messageCount || 0,
+        lastSeen: user.lastSeen || 'Never',
+        firstSeen: user.firstSeen || 'Never'
+    }));
+    res.json(usersList);
+});
+
+// API: Add User
+app.post('/api/users/add', authMiddleware, (req, res) => {
+    const { number } = req.body;
+    if (!number) return res.status(400).json({ error: 'Number required' });
+    
+    const jid = `${number}@s.whatsapp.net`;
+    if (!botSettings.allowedUsers.includes(jid)) {
+        botSettings.allowedUsers.push(jid);
+        res.json({ success: true, message: `User ${number} added!` });
+    } else {
+        res.json({ success: false, message: 'User already exists!' });
+    }
+});
+
+// API: Remove User
+app.post('/api/users/remove', authMiddleware, (req, res) => {
+    const { number } = req.body;
+    const jid = `${number}@s.whatsapp.net`;
+    botSettings.allowedUsers = botSettings.allowedUsers.filter(u => u !== jid);
+    res.json({ success: true, message: `User ${number} removed!` });
+});
+
+// API: Ban User
+app.post('/api/users/ban', authMiddleware, (req, res) => {
+    const { number } = req.body;
+    const jid = `${number}@s.whatsapp.net`;
+    if (!botData.bannedUsers.includes(jid)) {
+        botData.bannedUsers.push(jid);
+        saveData();
+    }
+    res.json({ success: true, message: `User ${number} banned!` });
+});
+
+// API: Unban User
+app.post('/api/users/unban', authMiddleware, (req, res) => {
+    const { number } = req.body;
+    const jid = `${number}@s.whatsapp.net`;
+    botData.bannedUsers = botData.bannedUsers.filter(u => u !== jid);
+    saveData();
+    res.json({ success: true, message: `User ${number} unbanned!` });
+});
+
+// API: Update Settings
+app.post('/api/settings', authMiddleware, (req, res) => {
+    const { prefix, autoReply, welcomeNewUsers } = req.body;
+    
+    if (prefix) botSettings.prefix = prefix;
+    if (typeof autoReply === 'boolean') botSettings.autoReply = autoReply;
+    if (typeof welcomeNewUsers === 'boolean') botSettings.welcomeNewUsers = welcomeNewUsers;
+    
+    res.json({ success: true, settings: botSettings });
+});
+
+// API: Message Logs
+app.get('/api/logs', authMiddleware, (req, res) => {
+    const limit = parseInt(req.query.limit) || 50;
+    const logs = botData.messages.slice(-limit).reverse();
+    res.json(logs);
+});
+
+// API: Send Broadcast
+app.post('/api/broadcast', authMiddleware, async (req, res) => {
+    const { message } = req.body;
+    if (!message || !global.sock) return res.status(400).json({ error: 'Message required or bot not ready' });
+    
+    let sentCount = 0;
+    for (const user of botSettings.allowedUsers) {
+        if (!botData.bannedUsers.includes(user)) {
+            try {
+                await global.sock.sendMessage(user, { text: `📢 *Broadcast:*\n\n${message}` });
+                sentCount++;
+                await new Promise(r => setTimeout(r, 1000));
+            } catch (e) {}
+        }
+    }
+    
+    res.json({ success: true, sentTo: sentCount });
+});
+
+// Start Dashboard Server
+app.listen(CONFIG.DASHBOARD_PORT, '0.0.0.0', () => {
+    console.log(`\n🌐 Dashboard: http://0.0.0.0:${CONFIG.DASHBOARD_PORT}`);
+    console.log(`👤 Username: ${CONFIG.DASHBOARD_USERNAME}`);
+    console.log(`🔑 Password: ${CONFIG.DASHBOARD_PASSWORD}`);
+});
 
 // =========== COMMANDS ===========
 const commands = new Map();
 
-// Prefix Command
 commands.set('prefix', {
     name: 'prefix',
-    aliases: ['px', 'pf'],
-    description: 'Bot prefix dikhayen',
-    category: 'system',
+    aliases: ['px'],
     execute: async (sock, msg, args) => {
-        const time = moment().tz('Asia/Karachi').format('hh:mm:ss A');
-        const date = moment().tz('Asia/Karachi').format('DD/MM/YYYY');
-        
-        const uptime = process.uptime();
-        const d = Math.floor(uptime / 86400);
-        const h = Math.floor((uptime % 86400) / 3600);
-        const m = Math.floor((uptime % 3600) / 60);
-        const s = Math.floor(uptime % 60);
-        
-        let uptimeStr = '';
-        if (d > 0) uptimeStr += `${d}d `;
-        if (h > 0) uptimeStr += `${h}h `;
-        uptimeStr += `${m}m ${s}s`;
-        
         const reply = `╔══════════════════╗
 ║  ✦ RDX PREFIX ✦  ║
 ╚══════════════════╝
 
-👑 Owner: Ahmad RDX
-🤖 Bot: RDX Premium
-⚡ Prefix: [ ${CONFIG.PREFIX} ]
-🕐 ${time} | ${date}
-⏱️ Uptime: ${uptimeStr}
+👑 Owner: ${CONFIG.OWNER_NAME}
+🤖 Bot: ${CONFIG.BOT_NAME}
+⚡ Prefix: [ ${botSettings.prefix} ]
 
-💡 ${CONFIG.PREFIX}help | ${CONFIG.PREFIX}menu
-📝 ${CONFIG.PREFIX}prefix bina . ke`;
-
+💡 ${botSettings.prefix}help | ${botSettings.prefix}menu`;
+        
         await sock.sendMessage(msg.key.remoteJid, { text: reply });
     }
 });
 
-// Info Command
 commands.set('info', {
     name: 'info',
-    aliases: ['botinfo', 'bot'],
-    description: 'Bot information',
-    category: 'system',
+    aliases: ['botinfo'],
     execute: async (sock, msg, args) => {
-        const time = moment().tz('Asia/Karachi').format('hh:mm:ss A');
-        const date = moment().tz('Asia/Karachi').format('DD/MM/YYYY');
-        
         const uptime = process.uptime();
         const d = Math.floor(uptime / 86400);
         const h = Math.floor((uptime % 86400) / 3600);
         const m = Math.floor((uptime % 3600) / 60);
-        const s = Math.floor(uptime % 60);
-        
-        let uptimeStr = '';
-        if (d > 0) uptimeStr += `${d}d `;
-        if (h > 0) uptimeStr += `${h}h `;
-        uptimeStr += `${m}m ${s}s`;
-        
-        const totalMem = (process.memoryUsage().heapTotal / 1024 / 1024).toFixed(2);
-        const usedMem = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2);
         
         const reply = `╔══════════════════╗
 ║   ✦ RDX BOT ✦   ║
 ╚══════════════════╝
 
-👑 Owner: Ahmad RDX
-🤖 Bot: RDX Premium
-📦 Version: 2.0.0
-⚡ Prefix: [ ${CONFIG.PREFIX} ]
-⏱️ Uptime: ${uptimeStr}
-💾 RAM: ${usedMem}/${totalMem}MB
-🕐 ${time} | ${date}
-🌐 Host: Local Server
+👑 Owner: ${CONFIG.OWNER_NAME}
+🤖 Bot: ${CONFIG.BOT_NAME}
+⚡ Prefix: [ ${botSettings.prefix} ]
+⏱️ Uptime: ${d}d ${h}h ${m}m
+👥 Users: ${Object.keys(botData.users).length}
+📊 Commands: ${commands.size}
 
-━━━━━━━━━━━━━━━━━
-💡 ${CONFIG.PREFIX}help | ${CONFIG.PREFIX}menu
-🔥 Powered by Ahmad RDX`;
-
+💡 ${botSettings.prefix}help`;
+        
         await sock.sendMessage(msg.key.remoteJid, { text: reply });
     }
 });
 
-// Help Command
 commands.set('help', {
     name: 'help',
-    aliases: ['menu', 'cmds', 'command'],
-    description: 'All commands list',
-    category: 'system',
+    aliases: ['menu'],
     execute: async (sock, msg, args) => {
-        const categories = {};
-        
-        commands.forEach((cmd, key) => {
-            if (!categories[cmd.category]) {
-                categories[cmd.category] = [];
-            }
-            categories[cmd.category].push(cmd);
-        });
-        
-        let helpText = `╔══════════════════╗
+        let help = `╔══════════════════╗
 ║  ✦ RDX MENU ✦  ║
 ╚══════════════════╝\n\n`;
         
-        for (const [category, cmds] of Object.entries(categories)) {
-            helpText += `📂 *${category.toUpperCase()}*\n`;
-            cmds.forEach(cmd => {
-                const aliases = cmd.aliases.length > 0 ? ` (${cmd.aliases.join(', ')})` : '';
-                helpText += `  ⚡ ${CONFIG.PREFIX}${cmd.name}${aliases}\n     ${cmd.description}\n`;
-            });
-            helpText += '\n';
-        }
-        
-        helpText += `━━━━━━━━━━━━━━━━━\n🔥 Powered by Ahmad RDX`;
-        
-        await sock.sendMessage(msg.key.remoteJid, { text: helpText });
-    }
-});
-
-// Sticker Command
-commands.set('sticker', {
-    name: 'sticker',
-    aliases: ['st', 's'],
-    description: 'Image/GIF/Video to sticker',
-    category: 'tools',
-    execute: async (sock, msg, args) => {
-        try {
-            const quoted = msg.message?.extendedTextMessage?.contextInfo;
-            const quotedMsg = quoted?.quotedMessage;
-            
-            let mediaType = null;
-            let mediaMessage = null;
-            
-            if (msg.message?.imageMessage) {
-                mediaType = 'image';
-                mediaMessage = msg.message.imageMessage;
-            } else if (msg.message?.videoMessage) {
-                mediaType = 'video';
-                mediaMessage = msg.message.videoMessage;
-            } else if (quotedMsg?.imageMessage) {
-                mediaType = 'image';
-                mediaMessage = quotedMsg.imageMessage;
-            } else if (quotedMsg?.videoMessage) {
-                mediaType = 'video';
-                mediaMessage = quotedMsg.videoMessage;
-            }
-            
-            if (mediaMessage && mediaType) {
-                const stream = await require('@whiskeysockets/baileys').downloadContentFromMessage(
-                    mediaMessage, 
-                    mediaType
-                );
-                
-                let buffer = Buffer.from([]);
-                for await (const chunk of stream) {
-                    buffer = Buffer.concat([buffer, chunk]);
-                }
-                
-                await sock.sendMessage(msg.key.remoteJid, {
-                    sticker: buffer,
-                    stickerAuthor: 'RDX Bot',
-                    stickerName: 'Ahmad RDX'
-                });
-            } else {
-                await sock.sendMessage(msg.key.remoteJid, {
-                    text: '❌ Image/GIF/Video bhejo ya reply karo sticker banane ke liye!'
-                });
-            }
-        } catch (error) {
-            console.error('Sticker error:', error);
-            await sock.sendMessage(msg.key.remoteJid, {
-                text: '❌ Sticker banane mein error!'
-            });
-        }
-    }
-});
-
-// Ping Command
-commands.set('ping', {
-    name: 'ping',
-    aliases: ['pong', 'speed'],
-    description: 'Bot latency check',
-    category: 'system',
-    execute: async (sock, msg, args) => {
-        const start = Date.now();
-        const sent = await sock.sendMessage(msg.key.remoteJid, { text: '�測 Pinging...' });
-        const latency = Date.now() - start;
-        await sock.sendMessage(msg.key.remoteJid, { 
-            text: `⚡ *Response:* ${latency}ms\n🟢 *Status:* Online\n🔥 *Engine:* RDX Premium` 
-        });
-    }
-});
-
-// Owner Command
-commands.set('owner', {
-    name: 'owner',
-    aliases: ['creator', 'dev', 'ahmad'],
-    description: 'Owner contact info',
-    category: 'system',
-    execute: async (sock, msg, args) => {
-        const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:Ahmad RDX\nORG:RDX Bot\nTITLE:Bot Developer\nTEL;type=CELL;type=VOICE;waid=YOUR_NUMBER:+YOUR_NUMBER\nEND:VCARD`;
-        
-        await sock.sendMessage(msg.key.remoteJid, {
-            contacts: {
-                displayName: '👑 Ahmad RDX',
-                contacts: [{ vcard }]
-            }
+        commands.forEach(cmd => {
+            help += `⚡ ${botSettings.prefix}${cmd.name}\n`;
         });
         
-        await sock.sendMessage(msg.key.remoteJid, {
-            text: `👑 *Owner:* Ahmad RDX\n📍 *Location:* Toba Tek Singh, Pakistan\n🤖 *Bot:* RDX Premium v2.0\n🌐 *Host:* Self Hosted\n━━━━━━━━━━━━━━━━━\n🔥 Powered by Ahmad RDX`
-        });
+        help += `\n🔥 Powered by ${CONFIG.OWNER_NAME}`;
+        await sock.sendMessage(msg.key.remoteJid, { text: help });
     }
 });
 
@@ -245,39 +308,61 @@ async function handleMessage(sock, msg) {
     const { key, message } = msg;
     const remoteJid = key.remoteJid;
     
-    if (remoteJid === 'status@broadcast') return;
-    if (key.fromMe) return;
+    if (remoteJid === 'status@broadcast' || key.fromMe) return;
     
-    let text = '';
-    if (message?.conversation) {
-        text = message.conversation;
-    } else if (message?.extendedTextMessage?.text) {
-        text = message.extendedTextMessage.text;
-    } else if (message?.imageMessage?.caption) {
-        text = message.imageMessage.caption;
-    } else if (message?.videoMessage?.caption) {
-        text = message.videoMessage.caption;
+    // Check banned
+    if (botData.bannedUsers.includes(remoteJid)) return;
+    
+    // Check allowed (agar allowed users list mein hai)
+    const number = remoteJid.split('@')[0];
+    if (botSettings.allowedUsers.length > 0 && !botSettings.allowedUsers.includes(remoteJid)) {
+        if (!botSettings.adminNumbers.includes(number)) {
+            return; // Not allowed user
+        }
     }
     
-    if (!text) return;
+    // Track user
+    if (!botData.users[remoteJid]) {
+        botData.users[remoteJid] = {
+            firstSeen: moment().format(),
+            messageCount: 0,
+            name: ''
+        };
+    }
+    botData.users[remoteJid].lastSeen = moment().format();
+    botData.users[remoteJid].messageCount = (botData.users[remoteJid].messageCount || 0) + 1;
     
-    // Bina prefix ke "prefix" command
+    // Extract text
+    let text = '';
+    if (message?.conversation) text = message.conversation;
+    else if (message?.extendedTextMessage?.text) text = message.extendedTextMessage.text;
+    else if (message?.imageMessage?.caption) text = message.imageMessage.caption;
+    
+    // Log message
+    botData.messages.push({
+        from: remoteJid,
+        text: text.substring(0, 100),
+        time: moment().format()
+    });
+    if (botData.messages.length > 500) botData.messages.shift();
+    saveData();
+    
+    // Handle "prefix" without prefix
     if (text.trim().toLowerCase() === 'prefix') {
         const cmd = commands.get('prefix');
         return cmd.execute(sock, msg, []);
     }
     
     // Prefix check
-    if (!text.startsWith(CONFIG.PREFIX)) return;
+    if (!text.startsWith(botSettings.prefix)) return;
     
-    const args = text.slice(CONFIG.PREFIX.length).trim().split(/ +/);
-    const commandName = args.shift().toLowerCase();
+    const args = text.slice(botSettings.prefix.length).trim().split(/ +/);
+    const commandName = args.shift()?.toLowerCase();
     
     let command = commands.get(commandName);
-    
     if (!command) {
         for (const [key, cmd] of commands) {
-            if (cmd.aliases && cmd.aliases.includes(commandName)) {
+            if (cmd.aliases?.includes(commandName)) {
                 command = cmd;
                 break;
             }
@@ -287,138 +372,78 @@ async function handleMessage(sock, msg) {
     if (command) {
         try {
             await command.execute(sock, msg, args);
-            console.log(`✅ [${moment().format('HH:mm:ss')}] ${commandName} | ${remoteJid}`);
+            
+            botData.commandsUsed[commandName] = (botData.commandsUsed[commandName] || 0) + 1;
+            console.log(`✅ ${commandName} | ${remoteJid}`);
         } catch (error) {
-            console.error(`❌ Error in ${commandName}:`, error);
-            await sock.sendMessage(remoteJid, { text: '❌ Command execute karne mein error!' });
+            console.error(`❌ Error:`, error);
         }
     }
 }
 
-// =========== PAIRING CODE LOGIN ===========
-async function askQuestion(question) {
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-    
-    return new Promise((resolve) => {
-        rl.question(question, (answer) => {
-            rl.close();
-            resolve(answer.trim());
-        });
-    });
-}
-
-// =========== BOT START ===========
+// =========== START BOT ===========
 async function startBot() {
-    console.log('╔══════════════════════════╗');
-    console.log('║   🤖 RDX WHATSAPP BOT  ║');
-    console.log('║   🔥 Ahmad RDX Premium ║');
-    console.log('╚══════════════════════════╝\n');
-    
-    if (CONFIG.LOGIN_METHOD === 'pairing') {
-        if (!CONFIG.OWNER_NUMBER) {
-            CONFIG.OWNER_NUMBER = await askQuestion('📱 Apna WhatsApp number enter karo (with country code, without +): ');
-        }
-        console.log(`\n📱 Number: ${CONFIG.OWNER_NUMBER}`);
-    }
+    console.log('╔══════════════════════════════╗');
+    console.log('║   🤖 RDX WHATSAPP BOT      ║');
+    console.log('║   🔥 Ahmad RDX Premium     ║');
+    console.log('╚══════════════════════════════╝\n');
     
     const { state, saveCreds } = await useMultiFileAuthState(CONFIG.SESSION_DIR);
-    
     const { version } = await fetchLatestBaileysVersion();
-    
-    console.log(`📦 Baileys Version: ${version}`);
     
     const sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
-        browser: Browsers.ubuntu('RDX Bot'),
-        logger: pino({ level: 'silent' })
+        browser: Browsers.ubuntu('RDX Bot')
     });
     
-    // =========== PAIRING CODE REQUEST ===========
+    global.sock = sock;
+    
+    // Pairing code request
     if (CONFIG.LOGIN_METHOD === 'pairing' && !sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
                 const code = await sock.requestPairingCode(CONFIG.OWNER_NUMBER);
                 console.log('\n╔══════════════════════════╗');
                 console.log('║   🔑 PAIRING CODE       ║');
-                console.log(`║   📱 ${CONFIG.OWNER_NUMBER}   ║`);
                 console.log(`║   🔢 ${code}              ║`);
                 console.log('╚══════════════════════════╝');
-                console.log('\n📝 WhatsApp open karo → Linked Devices → Link with phone number → Ye code enter karo!\n');
             } catch (error) {
-                console.error('❌ Pairing code error:', error.message);
-                console.log('🔄 QR Code se try karo...');
+                console.error('Pairing error:', error.message);
             }
         }, 3000);
     }
     
-    // =========== CONNECTION HANDLER ===========
     sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, qr } = update;
         
         if (qr && CONFIG.LOGIN_METHOD === 'qr') {
-            console.log('\n📱 QR Code scan karo:\n');
             qrcode.generate(qr, { small: true });
         }
         
-        if (connection === 'connecting') {
-            console.log('🔄 Connecting...');
-        }
-        
         if (connection === 'open') {
-            console.log('\n✅ Bot Connected Successfully!');
-            console.log(`🤖 Bot Name: ${CONFIG.BOT_NAME}`);
-            console.log(`👑 Owner: ${CONFIG.OWNER_NAME}`);
-            console.log(`⚡ Prefix: ${CONFIG.PREFIX}`);
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━\n');
+            global.botConnection = 'connected';
+            console.log('\n✅ Bot Connected!');
         }
         
         if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-            
-            console.log('❌ Disconnected!');
-            
-            if (statusCode === DisconnectReason.loggedOut) {
-                console.log('🚫 Logged out! Session delete karo aur dobara start karo.');
-            } else if (shouldReconnect) {
-                console.log('🔄 Reconnecting in 5 seconds...');
-                setTimeout(() => startBot(), 5000);
+            global.botConnection = 'disconnected';
+            const code = update.lastDisconnect?.error?.output?.statusCode;
+            if (code !== DisconnectReason.loggedOut) {
+                setTimeout(startBot, 5000);
             }
         }
     });
     
-    // Save credentials
     sock.ev.on('creds.update', saveCreds);
     
-    // Message handler
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
-        if (!msg.message) return;
-        
-        if (m.type === 'notify') {
-            await handleMessage(sock, msg);
-        }
+        if (!msg.message || m.type !== 'notify') return;
+        await handleMessage(sock, msg);
     });
-    
-    return sock;
 }
 
-// Error handling
-process.on('uncaughtException', (err) => {
-    console.error('❌ Uncaught Exception:', err.message);
-});
-
-process.on('unhandledRejection', (reason) => {
-    console.error('❌ Unhandled Rejection:', reason);
-});
-
-// Start bot
-startBot().catch(err => {
-    console.error('❌ Bot start error:', err);
-    process.exit(1);
-});
+// Start Everything
+startBot().catch(console.error);
