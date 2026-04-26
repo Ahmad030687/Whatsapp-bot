@@ -5,7 +5,7 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "postinstall": "echo 'Installed!'"
+    "build": "npm install"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "*",
