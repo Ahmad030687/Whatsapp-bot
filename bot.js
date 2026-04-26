@@ -11,295 +11,297 @@ const fs = require('fs-extra');
 const path = require('path');
 const moment = require('moment-timezone');
 const express = require('express');
-const readline = require('readline');
 
-// =========== CONFIGURATION (SAB KUCH CODE MEIN) ===========
+// =========== ⚙️ CONFIGURATION ===========
 const CONFIG = {
-    // Bot Settings
     BOT_NAME: 'RDX Bot',
     PREFIX: '.',
     OWNER_NAME: 'Ahmad RDX',
-    OWNER_NUMBER: '923000000000', // Apna WhatsApp number
+    OWNER_NUMBER: '923156894148',
+    LOGIN_METHOD: 'pairing',
     
-    // Login Settings
-    LOGIN_METHOD: 'pairing', // 'pairing' ya 'qr'
+    ADMIN_USERNAME: 'admin',
+    ADMIN_PASSWORD: 'ahmadrdx123',
     
-    // Dashboard Settings
-    DASHBOARD_PORT: 3000,
-    DASHBOARD_USERNAME: 'admin',
-    DASHBOARD_PASSWORD: 'ahmadrdx123',
-    
-    // Allowed Users (Bot jin numbers par lagega)
-    ALLOWED_USERS: [
-        '923000000000@s.whatsapp.net', // Number 1
-        '923000000001@s.whatsapp.net', // Number 2
-        // Aur numbers add karo
-    ],
-    
-    // Admin Numbers (Dashboard access + Bot control)
-    ADMIN_NUMBERS: [
-        '923000000000', // Admin 1
-    ],
+    ALLOWED_USERS: [],
+    ADMIN_NUMBERS: ['923156894148'],
     
     SESSION_DIR: './session',
-    DATA_DIR: './data',
-    CACHE_DIR: './cache'
+    DATA_DIR: './data'
 };
 
-// Bot settings (runtime changeable)
+// =========== 📦 GLOBAL VARIABLES ===========
+global.botConnection = 'connecting';
+global.sock = null;
+global.startTime = Date.now();
+
 let botSettings = {
     prefix: CONFIG.PREFIX,
-    allowedUsers: [...CONFIG.ALLOWED_USERS],
-    adminNumbers: [...CONFIG.ADMIN_NUMBERS],
-    autoReply: true,
-    welcomeNewUsers: true
+    autoReply: true
 };
 
-// =========== DATA STORAGE ===========
 let botData = {
-    users: {},         // User info store
-    messages: [],      // Message logs
-    commandsUsed: {},  // Command statistics
-    bannedUsers: [],   // Banned users
-    pairs: {}          // User pairs
+    users: {},
+    messages: [],
+    commandsUsed: {},
+    bannedUsers: [],
+    allowedUsers: CONFIG.ALLOWED_USERS,
+    adminNumbers: CONFIG.ADMIN_NUMBERS
 };
 
-// Load existing data
+// Load saved data
 try {
     const dataPath = path.join(CONFIG.DATA_DIR, 'botData.json');
     if (fs.existsSync(dataPath)) {
-        botData = JSON.parse(fs.readFileSync(dataPath));
+        const saved = JSON.parse(fs.readFileSync(dataPath));
+        botData = { ...botData, ...saved };
     }
 } catch (e) {}
 
-// Save data function
 function saveData() {
     fs.ensureDirSync(CONFIG.DATA_DIR);
-    fs.writeFileSync(
-        path.join(CONFIG.DATA_DIR, 'botData.json'),
-        JSON.stringify(botData, null, 2)
-    );
+    fs.writeFileSync(path.join(CONFIG.DATA_DIR, 'botData.json'), JSON.stringify(botData, null, 2));
 }
 
-// =========== EXPRESS DASHBOARD ===========
+// =========== 🌐 EXPRESS SERVER ===========
 const app = express();
+const PORT = process.env.PORT || 8000;
+
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.urlencoded({ extended: true }));
 
-// Auth middleware
-function authMiddleware(req, res, next) {
-    const auth = req.headers.authorization;
-    if (!auth || auth !== `Basic ${Buffer.from(`${CONFIG.DASHBOARD_USERNAME}:${CONFIG.DASHBOARD_PASSWORD}`).toString('base64')}`) {
-        res.set('WWW-Authenticate', 'Basic realm="RDX Bot Dashboard"');
-        return res.status(401).json({ error: 'Authentication required' });
-    }
-    next();
-}
-
-// =========== DASHBOARD ROUTES ===========
-
-// Dashboard Login Page
+// Serve static dashboard
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'dashboard.html'));
 });
 
-// API: Bot Status
+// Auth check
+function checkAuth(req, res, next) {
+    const auth = req.headers.authorization;
+    if (!auth) {
+        res.set('WWW-Authenticate', 'Basic realm="RDX Bot Dashboard"');
+        return res.status(401).send('Authentication required');
+    }
+    const [username, password] = Buffer.from(auth.split(' ')[1], 'base64').toString().split(':');
+    if (username === CONFIG.ADMIN_USERNAME && password === CONFIG.ADMIN_PASSWORD) {
+        return next();
+    }
+    return res.status(403).send('Access Denied');
+}
+
+// =========== 📊 API ROUTES ===========
+
+// Status API
 app.get('/api/status', (req, res) => {
-    const uptime = process.uptime();
+    const uptime = Math.floor((Date.now() - global.startTime) / 1000);
     const d = Math.floor(uptime / 86400);
     const h = Math.floor((uptime % 86400) / 3600);
     const m = Math.floor((uptime % 3600) / 60);
+    const s = uptime % 60;
     
-    const memUsage = process.memoryUsage();
+    const mem = process.memoryUsage();
     
     res.json({
+        success: true,
         bot: {
             name: CONFIG.BOT_NAME,
-            status: global.botConnection || 'disconnected',
+            status: global.botConnection,
             prefix: botSettings.prefix,
-            uptime: `${d}d ${h}h ${m}m`,
-            owner: CONFIG.OWNER_NAME
+            owner: CONFIG.OWNER_NAME,
+            uptime: `${d}d ${h}h ${m}m ${s}s`,
+            startTime: moment(global.startTime).tz('Asia/Karachi').format('DD/MM/YYYY hh:mm A')
         },
         stats: {
             totalUsers: Object.keys(botData.users).length,
-            totalMessages: botData.messages.length,
-            commandsUsed: botData.commandsUsed,
-            allowedUsers: botSettings.allowedUsers.length,
+            allowedUsers: botData.allowedUsers.length,
             bannedUsers: botData.bannedUsers.length,
-            totalPairs: Object.keys(botData.pairs).length
+            totalMessages: botData.messages.length,
+            commandsUsed: Object.keys(botData.commandsUsed).length,
+            adminNumbers: botData.adminNumbers.length
         },
         system: {
-            memory: `${(memUsage.heapUsed / 1024 / 1024).toFixed(2)}MB / ${(memUsage.heapTotal / 1024 / 1024).toFixed(2)}MB`,
+            memoryUsed: `${(mem.heapUsed / 1024 / 1024).toFixed(1)}MB`,
+            memoryTotal: `${(mem.heapTotal / 1024 / 1024).toFixed(1)}MB`,
+            memoryPercent: ((mem.heapUsed / mem.heapTotal) * 100).toFixed(1),
             platform: process.platform,
-            nodeVersion: process.version
+            nodeVersion: process.version,
+            pid: process.pid
         },
-        timestamp: moment().tz('Asia/Karachi').format('hh:mm:ss A | DD/MM/YYYY')
+        time: moment().tz('Asia/Karachi').format('hh:mm:ss A | DD/MM/YYYY')
     });
 });
 
-// API: All Users List
-app.get('/api/users', authMiddleware, (req, res) => {
-    const usersList = Object.entries(botData.users).map(([jid, user]) => ({
-        jid: jid,
-        number: jid.split('@')[0],
-        name: user.name || 'Unknown',
-        role: botSettings.adminNumbers.includes(jid.split('@')[0]) ? 'admin' : 'user',
-        allowed: botSettings.allowedUsers.includes(jid),
-        banned: botData.bannedUsers.includes(jid),
-        messageCount: user.messageCount || 0,
-        lastSeen: user.lastSeen || 'Never',
-        firstSeen: user.firstSeen || 'Never'
-    }));
-    res.json(usersList);
+// Users API
+app.get('/api/users', checkAuth, (req, res) => {
+    const users = Object.entries(botData.users).map(([jid, data]) => {
+        const number = jid.split('@')[0];
+        return {
+            jid,
+            number,
+            name: data.name || 'Unknown',
+            isAllowed: botData.allowedUsers.includes(jid),
+            isAdmin: botData.adminNumbers.includes(number),
+            isBanned: botData.bannedUsers.includes(jid),
+            messageCount: data.messageCount || 0,
+            firstSeen: data.firstSeen || 'N/A',
+            lastSeen: data.lastSeen || 'N/A'
+        };
+    });
+    res.json({ success: true, users });
 });
 
-// API: Add User
-app.post('/api/users/add', authMiddleware, (req, res) => {
+// Add User
+app.post('/api/users/add', checkAuth, (req, res) => {
     const { number } = req.body;
-    if (!number) return res.status(400).json({ error: 'Number required' });
+    if (!number) return res.json({ success: false, message: 'Number required' });
     
     const jid = `${number}@s.whatsapp.net`;
-    if (!botSettings.allowedUsers.includes(jid)) {
-        botSettings.allowedUsers.push(jid);
-        res.json({ success: true, message: `User ${number} added!` });
-    } else {
-        res.json({ success: false, message: 'User already exists!' });
+    if (!botData.allowedUsers.includes(jid)) {
+        botData.allowedUsers.push(jid);
+        saveData();
+        return res.json({ success: true, message: `✅ User ${number} added successfully!` });
     }
+    res.json({ success: false, message: '⚠️ User already exists!' });
 });
 
-// API: Remove User
-app.post('/api/users/remove', authMiddleware, (req, res) => {
+// Remove User
+app.post('/api/users/remove', checkAuth, (req, res) => {
     const { number } = req.body;
     const jid = `${number}@s.whatsapp.net`;
-    botSettings.allowedUsers = botSettings.allowedUsers.filter(u => u !== jid);
-    res.json({ success: true, message: `User ${number} removed!` });
+    botData.allowedUsers = botData.allowedUsers.filter(u => u !== jid);
+    delete botData.users[jid];
+    saveData();
+    res.json({ success: true, message: `🗑️ User ${number} removed!` });
 });
 
-// API: Ban User
-app.post('/api/users/ban', authMiddleware, (req, res) => {
+// Ban User
+app.post('/api/users/ban', checkAuth, (req, res) => {
     const { number } = req.body;
     const jid = `${number}@s.whatsapp.net`;
     if (!botData.bannedUsers.includes(jid)) {
         botData.bannedUsers.push(jid);
         saveData();
+        return res.json({ success: true, message: `🚫 User ${number} banned!` });
     }
-    res.json({ success: true, message: `User ${number} banned!` });
+    res.json({ success: false, message: 'Already banned!' });
 });
 
-// API: Unban User
-app.post('/api/users/unban', authMiddleware, (req, res) => {
+// Unban User
+app.post('/api/users/unban', checkAuth, (req, res) => {
     const { number } = req.body;
     const jid = `${number}@s.whatsapp.net`;
     botData.bannedUsers = botData.bannedUsers.filter(u => u !== jid);
     saveData();
-    res.json({ success: true, message: `User ${number} unbanned!` });
+    res.json({ success: true, message: `✅ User ${number} unbanned!` });
 });
 
-// API: Update Settings
-app.post('/api/settings', authMiddleware, (req, res) => {
-    const { prefix, autoReply, welcomeNewUsers } = req.body;
-    
+// Update Settings
+app.post('/api/settings', checkAuth, (req, res) => {
+    const { prefix, autoReply } = req.body;
     if (prefix) botSettings.prefix = prefix;
     if (typeof autoReply === 'boolean') botSettings.autoReply = autoReply;
-    if (typeof welcomeNewUsers === 'boolean') botSettings.welcomeNewUsers = welcomeNewUsers;
-    
-    res.json({ success: true, settings: botSettings });
+    res.json({ success: true, message: '✅ Settings updated!', settings: botSettings });
 });
 
-// API: Message Logs
-app.get('/api/logs', authMiddleware, (req, res) => {
-    const limit = parseInt(req.query.limit) || 50;
+// Get Logs
+app.get('/api/logs', checkAuth, (req, res) => {
+    const limit = parseInt(req.query.limit) || 100;
     const logs = botData.messages.slice(-limit).reverse();
-    res.json(logs);
+    res.json({ success: true, logs });
 });
 
-// API: Send Broadcast
-app.post('/api/broadcast', authMiddleware, async (req, res) => {
+// Broadcast
+app.post('/api/broadcast', checkAuth, async (req, res) => {
     const { message } = req.body;
-    if (!message || !global.sock) return res.status(400).json({ error: 'Message required or bot not ready' });
+    if (!message) return res.json({ success: false, message: 'Message required!' });
+    if (!global.sock) return res.json({ success: false, message: 'Bot not connected!' });
     
-    let sentCount = 0;
-    for (const user of botSettings.allowedUsers) {
-        if (!botData.bannedUsers.includes(user)) {
+    let sent = 0;
+    let failed = 0;
+    
+    for (const jid of botData.allowedUsers) {
+        if (!botData.bannedUsers.includes(jid)) {
             try {
-                await global.sock.sendMessage(user, { text: `📢 *Broadcast:*\n\n${message}` });
-                sentCount++;
-                await new Promise(r => setTimeout(r, 1000));
-            } catch (e) {}
+                await global.sock.sendMessage(jid, { 
+                    text: `📢 *BROADCAST*\n\n${message}\n\n━━━━━━━━━━━━━━━\n🤖 ${CONFIG.BOT_NAME}\n👑 ${CONFIG.OWNER_NAME}` 
+                });
+                sent++;
+                await new Promise(r => setTimeout(r, 1500));
+            } catch (e) {
+                failed++;
+            }
         }
     }
     
-    res.json({ success: true, sentTo: sentCount });
+    res.json({ success: true, message: `📤 Sent to ${sent} users! (${failed} failed)` });
 });
 
-// Start Dashboard Server
-app.listen(CONFIG.DASHBOARD_PORT, '0.0.0.0', () => {
-    console.log(`\n🌐 Dashboard: http://0.0.0.0:${CONFIG.DASHBOARD_PORT}`);
-    console.log(`👤 Username: ${CONFIG.DASHBOARD_USERNAME}`);
-    console.log(`🔑 Password: ${CONFIG.DASHBOARD_PASSWORD}`);
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n🌐 Dashboard: http://0.0.0.0:${PORT}`);
+    console.log(`👤 Username: ${CONFIG.ADMIN_USERNAME}`);
+    console.log(`🔑 Password: ${CONFIG.ADMIN_PASSWORD}\n`);
 });
 
-// =========== COMMANDS ===========
+// =========== 🤖 WHATSAPP COMMANDS ===========
 const commands = new Map();
 
 commands.set('prefix', {
     name: 'prefix',
-    aliases: ['px'],
-    execute: async (sock, msg, args) => {
-        const reply = `╔══════════════════╗
-║  ✦ RDX PREFIX ✦  ║
-╚══════════════════╝
+    aliases: ['px', 'pf'],
+    execute: async (sock, msg) => {
+        const reply = `╔══════════════════════╗
+║   ✦ RDX PREFIX ✦   ║
+╚══════════════════════╝
 
 👑 Owner: ${CONFIG.OWNER_NAME}
 🤖 Bot: ${CONFIG.BOT_NAME}
 ⚡ Prefix: [ ${botSettings.prefix} ]
 
 💡 ${botSettings.prefix}help | ${botSettings.prefix}menu`;
-        
         await sock.sendMessage(msg.key.remoteJid, { text: reply });
     }
 });
 
 commands.set('info', {
     name: 'info',
-    aliases: ['botinfo'],
-    execute: async (sock, msg, args) => {
-        const uptime = process.uptime();
+    aliases: ['botinfo', 'status'],
+    execute: async (sock, msg) => {
+        const uptime = Math.floor((Date.now() - global.startTime) / 1000);
         const d = Math.floor(uptime / 86400);
         const h = Math.floor((uptime % 86400) / 3600);
         const m = Math.floor((uptime % 3600) / 60);
+        const s = uptime % 60;
+        const mem = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
         
-        const reply = `╔══════════════════╗
-║   ✦ RDX BOT ✦   ║
-╚══════════════════╝
+        const reply = `╔══════════════════════╗
+║   ✦ RDX BOT INFO ✦  ║
+╚══════════════════════╝
 
 👑 Owner: ${CONFIG.OWNER_NAME}
 🤖 Bot: ${CONFIG.BOT_NAME}
-⚡ Prefix: [ ${botSettings.prefix} ]
-⏱️ Uptime: ${d}d ${h}h ${m}m
+⚡ Prefix: ${botSettings.prefix}
+⏱️ Uptime: ${d}d ${h}h ${m}m ${s}s
+💾 RAM: ${mem}MB
 👥 Users: ${Object.keys(botData.users).length}
 📊 Commands: ${commands.size}
-
-💡 ${botSettings.prefix}help`;
-        
+🟢 Status: ${global.botConnection}`;
         await sock.sendMessage(msg.key.remoteJid, { text: reply });
     }
 });
 
 commands.set('help', {
     name: 'help',
-    aliases: ['menu'],
-    execute: async (sock, msg, args) => {
-        let help = `╔══════════════════╗
-║  ✦ RDX MENU ✦  ║
-╚══════════════════╝\n\n`;
-        
+    aliases: ['menu', 'cmds'],
+    execute: async (sock, msg) => {
+        let text = `╔══════════════════════╗
+║   ✦ RDX MENU ✦    ║
+╚══════════════════════╝\n\n`;
         commands.forEach(cmd => {
-            help += `⚡ ${botSettings.prefix}${cmd.name}\n`;
+            text += `⚡ ${botSettings.prefix}${cmd.name}\n   ${cmd.aliases ? 'Aliases: ' + cmd.aliases.join(', ') : ''}\n\n`;
         });
-        
-        help += `\n🔥 Powered by ${CONFIG.OWNER_NAME}`;
-        await sock.sendMessage(msg.key.remoteJid, { text: help });
+        text += `🔥 ${CONFIG.OWNER_NAME}`;
+        await sock.sendMessage(msg.key.remoteJid, { text });
     }
 });
 
@@ -309,79 +311,61 @@ async function handleMessage(sock, msg) {
     const remoteJid = key.remoteJid;
     
     if (remoteJid === 'status@broadcast' || key.fromMe) return;
-    
-    // Check banned
     if (botData.bannedUsers.includes(remoteJid)) return;
     
-    // Check allowed (agar allowed users list mein hai)
     const number = remoteJid.split('@')[0];
-    if (botSettings.allowedUsers.length > 0 && !botSettings.allowedUsers.includes(remoteJid)) {
-        if (!botSettings.adminNumbers.includes(number)) {
-            return; // Not allowed user
-        }
-    }
+    const isAdmin = botData.adminNumbers.includes(number);
+    const isAllowed = botData.allowedUsers.includes(remoteJid);
+    
+    if (!isAdmin && !isAllowed && botData.allowedUsers.length > 0) return;
     
     // Track user
     if (!botData.users[remoteJid]) {
-        botData.users[remoteJid] = {
-            firstSeen: moment().format(),
-            messageCount: 0,
-            name: ''
-        };
+        botData.users[remoteJid] = { firstSeen: moment().format(), messageCount: 0, name: '' };
     }
     botData.users[remoteJid].lastSeen = moment().format();
-    botData.users[remoteJid].messageCount = (botData.users[remoteJid].messageCount || 0) + 1;
+    botData.users[remoteJid].messageCount++;
     
-    // Extract text
     let text = '';
     if (message?.conversation) text = message.conversation;
     else if (message?.extendedTextMessage?.text) text = message.extendedTextMessage.text;
     else if (message?.imageMessage?.caption) text = message.imageMessage.caption;
     
-    // Log message
-    botData.messages.push({
-        from: remoteJid,
-        text: text.substring(0, 100),
-        time: moment().format()
-    });
-    if (botData.messages.length > 500) botData.messages.shift();
-    saveData();
+    if (!text) return;
     
-    // Handle "prefix" without prefix
+    // Log
+    botData.messages.push({ from: number, text: text.substring(0, 100), time: moment().format() });
+    if (botData.messages.length > 200) botData.messages = botData.messages.slice(-200);
+    if (Math.random() < 0.1) saveData();
+    
+    // "prefix" without prefix
     if (text.trim().toLowerCase() === 'prefix') {
-        const cmd = commands.get('prefix');
-        return cmd.execute(sock, msg, []);
+        return commands.get('prefix').execute(sock, msg);
     }
     
-    // Prefix check
     if (!text.startsWith(botSettings.prefix)) return;
     
     const args = text.slice(botSettings.prefix.length).trim().split(/ +/);
-    const commandName = args.shift()?.toLowerCase();
+    const cmdName = args.shift()?.toLowerCase();
     
-    let command = commands.get(commandName);
+    let command = commands.get(cmdName);
     if (!command) {
-        for (const [key, cmd] of commands) {
-            if (cmd.aliases?.includes(commandName)) {
-                command = cmd;
-                break;
-            }
+        for (const [k, v] of commands) {
+            if (v.aliases?.includes(cmdName)) { command = v; break; }
         }
     }
     
     if (command) {
         try {
             await command.execute(sock, msg, args);
-            
-            botData.commandsUsed[commandName] = (botData.commandsUsed[commandName] || 0) + 1;
-            console.log(`✅ ${commandName} | ${remoteJid}`);
-        } catch (error) {
-            console.error(`❌ Error:`, error);
+            botData.commandsUsed[cmdName] = (botData.commandsUsed[cmdName] || 0) + 1;
+        } catch (e) {
+            console.error('Command error:', e);
         }
     }
 }
 
-// =========== START BOT ===========
+// =========== 🚀 START BOT ===========
 async function startBot() {
     console.log('╔══════════════════════════════╗');
     console.log('║   🤖 RDX WHATSAPP BOT      ║');
@@ -395,49 +379,43 @@ async function startBot() {
         version,
         auth: state,
         printQRInTerminal: false,
-        browser: Browsers.ubuntu('RDX Bot')
+        browser: Browsers.ubuntu('RDX Bot'),
+        logger: require('pino')({ level: 'silent' })
     });
     
     global.sock = sock;
     
-    // Pairing code request
     if (CONFIG.LOGIN_METHOD === 'pairing' && !sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
                 const code = await sock.requestPairingCode(CONFIG.OWNER_NUMBER);
-                console.log('\n╔══════════════════════════╗');
+                console.log('╔══════════════════════════╗');
                 console.log('║   🔑 PAIRING CODE       ║');
                 console.log(`║   🔢 ${code}              ║`);
                 console.log('╚══════════════════════════╝');
-            } catch (error) {
-                console.error('Pairing error:', error.message);
+                console.log('\n📱 WhatsApp → Linked Devices → Link with phone number → Code enter karo!\n');
+            } catch (e) {
+                console.error('Pairing error:', e.message);
             }
         }, 3000);
     }
     
     sock.ev.on('connection.update', (update) => {
         const { connection, qr } = update;
-        
-        if (qr && CONFIG.LOGIN_METHOD === 'qr') {
-            qrcode.generate(qr, { small: true });
-        }
-        
+        if (qr) { qrcode.generate(qr, { small: true }); }
         if (connection === 'open') {
             global.botConnection = 'connected';
-            console.log('\n✅ Bot Connected!');
+            console.log('✅ Connected!');
         }
-        
         if (connection === 'close') {
             global.botConnection = 'disconnected';
-            const code = update.lastDisconnect?.error?.output?.statusCode;
-            if (code !== DisconnectReason.loggedOut) {
+            if (update.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
                 setTimeout(startBot, 5000);
             }
         }
     });
     
     sock.ev.on('creds.update', saveCreds);
-    
     sock.ev.on('messages.upsert', async (m) => {
         const msg = m.messages[0];
         if (!msg.message || m.type !== 'notify') return;
@@ -445,5 +423,4 @@ async function startBot() {
     });
 }
 
-// Start Everything
 startBot().catch(console.error);
